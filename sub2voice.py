@@ -28,10 +28,20 @@ import argparse, os, sys, json, time, subprocess, tempfile
 from PIL import Image, ImageChops
 
 # ---------- CẤU HÌNH VISION ----------
+# Hỗ trợ OpenAI-compatible: OpenAI, OpenRouter (free), hoặc local (ollama/llama.cpp)
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "")
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "https://api.openai.com/v1")
-VISION_MODEL = os.environ.get("VISION_MODEL", "gpt-4o-mini")
-# Nếu muốn dùng local vision (vd llama.cpp / ollama), set VISION_BASE_URL + VISION_MODEL tương ứng.
+VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "")
+VISION_MODEL = os.environ.get("VISION_MODEL", "")
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "openai").lower()
+
+if not VISION_BASE_URL:
+    if VISION_PROVIDER == "openrouter":
+        VISION_BASE_URL = "https://openrouter.ai/api/v1"
+        VISION_MODEL = VISION_MODEL or "google/gemini-flash-1.5"
+    else:  # openai
+        VISION_BASE_URL = "https://api.openai.com/v1"
+        VISION_MODEL = VISION_MODEL or "gpt-4o-mini"
+# Nếu dùng local (ollama/llama.cpp): set VISION_BASE_URL + VISION_MODEL tương ứng.
 
 def vision_read_text(image_path):
     """Gọi Vision API đọc text tiếng Việt từ crop phụ đề. Trả về str hoặc ''. """

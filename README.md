@@ -30,6 +30,10 @@ App dùng OpenAI-compatible Vision API. Set env:
 export VISION_API_KEY="sk-..."
 export VISION_BASE_URL="https://api.openai.com/v1"   # hoặc base url của nhà cung cấp khác
 export VISION_MODEL="gpt-4o-mini"                    # model có khả năng nhìn
+# Hoặc dùng OpenRouter MIỄN PHÍ:
+export VISION_PROVIDER=openrouter
+export VISION_API_KEY="sk-or-..."      # lấy tại openrouter.ai/keys
+export VISION_MODEL="google/gemini-flash-1.5"
 ```
 
 > Muốn chạy local: dùng llama.cpp / ollama có vision, set
