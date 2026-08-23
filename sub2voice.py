@@ -12,16 +12,19 @@ Quy trình:
   6. Ghép audio VN vào video, mute tiếng gốc.
 
 Cài đặt:
-  pip install pillow edge-tts
+  pip install pillow edge-tts flask
 
-Chạy:
+Chạy CLI:
   python3 sub2voice.py video.mp4 --out video_vi.mp4
   python3 sub2voice.py video.mp4 --voice vi-VN-HoaiMyNeural --rate +10%
+
+Chạy Web UI:
+  python3 app.py            # mở http://localhost:5000
 
 Biến môi trường:
   VISION_API_KEY, VISION_BASE_URL, VISION_MODEL   (mặc định dùng OpenAI)
 """
-import argparse, os, sys, json, time, subprocess, hashlib, tempfile
+import argparse, os, sys, json, time, subprocess, tempfile
 from PIL import Image, ImageChops
 
 # ---------- CẤU HÌNH VISION ----------
@@ -74,15 +77,14 @@ def sub_band(img, top=0.80, bot=0.97, scale=3):
     band = img.crop((0, int(h*top), w, int(h*bot)))
     return band.resize((band.size[0]*scale, band.size[1]*scale))
 
-def dedup_frames(frames, min_gap=1.0, diff_thresh=6.0):
+def dedup_frames(frames, fps, min_gap=1.0, diff_thresh=6.0):
     """Trả về list (time_sec, frame_path) chỉ giữ frame có phụ đề đổi."""
     reps = []
     prev = None
     prev_t = -10
     for fp in frames:
         idx = int(os.path.basename(fp).split("_")[1].split(".")[0])
-        # fps được lấy từ tên folder hoặc truyền vào; ở đây giả sử 3fps
-        t = idx / 3.0
+        t = idx / fps
         band = sub_band(Image.open(fp).convert("L"))
         keep = False
         if prev is None:
@@ -100,24 +102,24 @@ def dedup_frames(frames, min_gap=1.0, diff_thresh=6.0):
 
 # ---------- TTS ----------
 def tts(text, voice, rate, out_mp3):
-    import edge_tts
+    import edge_tts, asyncio
     async def _run():
         comm = edge_tts.Communicate(text, voice, rate=rate)
         await comm.save(out_mp3)
-    import asyncio
     asyncio.run(_run())
 
 # ---------- GHÉP AUDIO ----------
 def build_audio(segs, total_dur, out_mp3, volume=2.2):
     """segs: list (start_sec, mp3_path). Mix vào 1 track, mute chỗ trống."""
     n = len(segs)
+    if n == 0:
+        raise RuntimeError("Không có câu nào để ghép.")
     inputs = ["-f", "lavfi", "-i", f"anullsrc=r=44100:cl=mono:d={total_dur}"]
     fparts = []
     for i, (t, p) in enumerate(segs):
         inputs += ["-i", p]
         delay = int(t*1000)
         fparts.append(f"[{i+1}:a]adelay={delay}|{delay}[d{i}]")
-    # chia nhóm tránh giới hạn amix input
     half = (n+1)//2
     g1 = "".join(f"[d{i}]" for i in range(half))
     g2 = "".join(f"[d{i}]" for i in range(half, n))
@@ -135,7 +137,61 @@ def mux(video, audio, out):
                     "-c:a", "copy", "-shortest", out],
                    check=True, capture_output=True)
 
-# ---------- MAIN ----------
+# ---------- PIPELINE CHÍNH (có callback progress) ----------
+def run_pipeline(video, out="output_vi.mp4", voice="vi-VN-NamMinhNeural",
+                 rate="+12%", volume=2.2, fps=3.0, workdir=None,
+                 progress_cb=None):
+    """Chạy full pipeline. progress_cb(step, total_steps, msg) được gọi liên tục."""
+    def prog(step, msg):
+        if progress_cb:
+            progress_cb(step, 5, msg)
+
+    workdir = workdir or tempfile.mkdtemp(prefix="sub2voice_")
+    os.makedirs(workdir, exist_ok=True)
+
+    prog(1, f"Extract frames ({fps} fps)...")
+    frames = extract_frames(video, fps, workdir)
+    prog(1, f"Extract xong: {len(frames)} frames")
+
+    prog(2, "Lọc frame trùng (chỉ giữ câu mới)...")
+    reps = dedup_frames(frames, fps, min_gap=1.0/fps*3, diff_thresh=6.0)
+    prog(2, f"Tìm được {len(reps)} câu đại diện")
+
+    prog(3, "Đọc phụ đề bằng Vision...")
+    segs_text = []
+    for i, (t, fp) in enumerate(reps):
+        txt = vision_read_text(fp)
+        if txt and txt.lower() not in ("", "không có chữ", "không"):
+            segs_text.append((t, txt))
+            prog(3, f"[{i+1}/{len(reps)}] {t:.1f}s: {txt[:50]}")
+        else:
+            prog(3, f"[{i+1}/{len(reps)}] {t:.1f}s: (bỏ - không có chữ)")
+    if not segs_text:
+        raise RuntimeError("Không đọc được phụ đề nào.")
+    prog(3, f"Đọc xong {len(segs_text)} câu")
+
+    prog(4, "TTS tiếng Việt...")
+    seg_dir = os.path.join(workdir, "segs")
+    os.makedirs(seg_dir, exist_ok=True)
+    segs_mp3 = []
+    for i, (t, txt) in enumerate(segs_text):
+        p = os.path.join(seg_dir, f"seg_{i:03d}.mp3")
+        tts(txt, voice, rate, p)
+        segs_mp3.append((t, p))
+        prog(4, f"TTS {i+1}/{len(segs_text)}")
+    prog(4, "TTS xong")
+
+    dur = float(subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
+        "-of","default=nw=1:nk=1",video],capture_output=True,text=True).stdout.strip())
+    track = os.path.join(workdir, "vn_track.mp3")
+    build_audio(segs_mp3, dur, track, volume)
+
+    prog(5, "Ghép vào video...")
+    mux(video, track, out)
+    prog(5, f"XONG -> {out}")
+    return out
+
+# ---------- CLI ----------
 def main():
     ap = argparse.ArgumentParser(description="Chuyển phụ đề trên màn hình -> voice VN")
     ap.add_argument("video")
@@ -147,45 +203,10 @@ def main():
     ap.add_argument("--workdir", default=None)
     args = ap.parse_args()
 
-    workdir = args.workdir or tempfile.mkdtemp(prefix="sub2voice_")
-    os.makedirs(workdir, exist_ok=True)
-    print(f"[1/5] Extract frames ({args.fps} fps)...")
-    frames = extract_frames(args.video, args.fps, workdir)
-    print(f"     {len(frames)} frames")
-
-    print("[2/5] Lọc frame trùng (chỉ giữ câu mới)...")
-    reps = dedup_frames(frames, min_gap=1.0/args.fps*3, diff_thresh=6.0)
-    print(f"     {len(reps)} câu đại diện")
-
-    print("[3/5] Đọc phụ đề bằng Vision...")
-    segs_text = []  # (time, text)
-    for i, (t, fp) in enumerate(reps):
-        txt = vision_read_text(fp)
-        if txt and txt.lower() not in ("", "không có chữ", "không"):
-            segs_text.append((t, txt))
-            print(f"  [{i}] {t}s: {txt[:50]}")
-        else:
-            print(f"  [{i}] {t}s: (bỏ - không có chữ)")
-    if not segs_text:
-        print("LỖI: không đọc được phụ đề nào."); sys.exit(1)
-
-    print("[4/5] TTS tiếng Việt...")
-    seg_dir = os.path.join(workdir, "segs")
-    os.makedirs(seg_dir, exist_ok=True)
-    segs_mp3 = []
-    for i, (t, txt) in enumerate(segs_text):
-        p = os.path.join(seg_dir, f"seg_{i:03d}.mp3")
-        tts(txt, args.voice, args.rate, p)
-        segs_mp3.append((t, p))
-
-    dur = float(subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
-        "-of","default=nw=1:nk=1",args.video],capture_output=True,text=True).stdout.strip())
-    track = os.path.join(workdir, "vn_track.mp3")
-    build_audio(segs_mp3, dur, track, args.volume)
-
-    print("[5/5] Ghép vào video...")
-    mux(args.video, track, args.out)
-    print(f"XONG -> {args.out}")
+    def cb(step, total, msg):
+        print(f"[{step}/{total}] {msg}")
+    run_pipeline(args.video, args.out, args.voice, args.rate,
+                 args.volume, args.fps, args.workdir, cb)
 
 if __name__ == "__main__":
     main()

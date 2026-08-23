@@ -37,6 +37,20 @@ export VISION_MODEL="gpt-4o-mini"                    # model có khả năng nh�
 
 ## Dùng
 
+### Web UI (khuyên dùng)
+
+```bash
+pip install -r requirements.txt
+export VISION_API_KEY="sk-..."
+python3 app.py
+# mở http://localhost:5000 → kéo-thả video, chọn giọng/tốc độ/âm lượng, bấm "Bắt đầu"
+```
+
+UI hiển thị progress realtime (từng bước: extract → lọc trùng → đọc vision → TTS → ghép),
+khi xong có nút tải video về. Không cần dùng terminal.
+
+### CLI
+
 ```bash
 # Cơ bản
 python3 sub2voice.py video.mp4 --out video_vi.mp4
