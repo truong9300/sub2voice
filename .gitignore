@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.mp4
+*.mp3
+*.wav
+dense/
+sub_only/
+sub_rep/
+dub_seg*/
+workdir*/
